@@ -89,11 +89,8 @@ namespace smallzhong
 
 
 	// 构造函数
-	Hook::Hook(ULONG64 funcAddr, ULONG64 callbackFunc)
+	Hook::Hook(ULONG64 funcAddr, ULONG64 callbackFunc) noexcept
 		: m_record_number(std::nullopt), m_func_addr(funcAddr), m_callback_func(callbackFunc) {
-		if (!install()) {
-			throw std::runtime_error("Failed to install hook");
-		}
 	}
 
 	// 移动构造函数
@@ -119,22 +116,21 @@ namespace smallzhong
 		reset();
 	}
 
-	// TODO:改成用throw传递信息。
 	// 安装 hook
-	BOOLEAN Hook::install() {
+	NTSTATUS Hook::install() noexcept {
 		if (m_record_number.has_value()) {
-			return TRUE;  // 已经安装了
+			return STATUS_SUCCESS;
+		}
+		if (!m_func_addr || !m_callback_func) {
+			return STATUS_INVALID_PARAMETER;
 		}
 
-		ULONG64 record_number;
-		NTSTATUS status = hook_by_addr(m_func_addr, m_callback_func, &record_number);
-
-		if (!NT_SUCCESS(status)) {
-			return FALSE;
+		ULONG64 record_number = 0;
+		const NTSTATUS status = hook_by_addr(m_func_addr, m_callback_func, &record_number);
+		if (NT_SUCCESS(status)) {
+			m_record_number = record_number;
 		}
-
-		m_record_number = record_number;
-		return TRUE;
+		return status;
 	}
 
 	// 重置/卸载 hook
@@ -158,23 +154,43 @@ namespace smallzhong
 		return m_record_number.has_value();
 	}
 
-	// 添加新的 hook，返回 hook 的索引（可用于手动移除）
-	size_t HookManager::add_hook(ULONG64 funcAddr, ULONG64 callbackFunc) {
+	ULONG64 Hook::get_function_address() const noexcept {
+		return m_func_addr;
+	}
+
+	NTSTATUS HookManager::add_hook(ULONG64 funcAddr, ULONG64 callbackFunc, size_t* hook_index) {
+		if (hook_index) {
+			*hook_index = static_cast<size_t>(-1);
+		}
 		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_shutdown) {
+			return STATUS_DELETE_PENDING;
+		}
 		if (hooked_funcs.count(funcAddr)) {
-			throw std::runtime_error("Function already hooked");
+			return STATUS_OBJECT_NAME_COLLISION;
 		}
 
+		// Allocate bookkeeping before installing the hook. The constructor cannot throw.
 		try {
-			m_hooks.emplace_back(funcAddr, callbackFunc);
 			hooked_funcs.insert(funcAddr);
-			return m_hooks.size() - 1;	
+			m_hooks.emplace_back(funcAddr, callbackFunc);
 		}
-		catch (const std::exception& e) {
-			// 捕获 Hook 构造函数可能抛出的异常
-			LOG_WARN("Failed to hook function at %llx: %s\n", funcAddr, e.what());
-			throw; // 重新抛出异常，让调用者处理
+		catch (const std::exception&) {
+			hooked_funcs.erase(funcAddr);
+			return STATUS_INSUFFICIENT_RESOURCES;
 		}
+
+		const NTSTATUS status = m_hooks.back().install();
+		if (!NT_SUCCESS(status)) {
+			hooked_funcs.erase(funcAddr);
+			m_hooks.pop_back();
+			return status;
+		}
+
+		if (hook_index) {
+			*hook_index = m_hooks.size() - 1;
+		}
+		return status;
 	}
 
 	// 移除特定的 hook (通过索引)
@@ -184,6 +200,7 @@ namespace smallzhong
 			return false;
 		}
 
+		hooked_funcs.erase(m_hooks[index].get_function_address());
 		// 使用移动赋值将最后一个元素移动到要删除的位置
 		if (index < m_hooks.size() - 1) {
 			m_hooks[index] = std::move(m_hooks.back());
@@ -198,6 +215,24 @@ namespace smallzhong
 	void HookManager::remove_all_hooks() {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_hooks.clear();
+		hooked_funcs.clear();
+	}
+
+	void HookManager::shutdown() {
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_shutdown) {
+			return;
+		}
+		m_shutdown = true;
+		m_hooks.clear();
+		hooked_funcs.clear();
+		const NTSTATUS status = kernel_hook_unload();
+		if (!NT_SUCCESS(status)) {
+			LOG_ERROR("kernel hook unload failed, status 0x%08lX\r\n", static_cast<ULONG>(status));
+		}
+		else {
+			LOG_INFO("Hook manager shut down\r\n");
+		}
 	}
 
 	// 获取当前 hook 数量

@@ -97,7 +97,8 @@ namespace smallzhong
 	// 单个 Hook 的封装类
 	class Hook {
 	public:
-		Hook(ULONG64 funcAddr, ULONG64 callbackFunc);
+		// Construction leaves the hook inactive. install() returns its NTSTATUS.
+		Hook(ULONG64 funcAddr, ULONG64 callbackFunc) noexcept;
 
 		// 移动构造函数
 		Hook(Hook&& other) noexcept;
@@ -113,7 +114,7 @@ namespace smallzhong
 		~Hook();
 
 		// 安装 hook
-		BOOLEAN install();
+		NTSTATUS install() noexcept;
 
 		// 重置/卸载 hook
 		void reset();
@@ -123,6 +124,8 @@ namespace smallzhong
 
 		// 检查 hook 是否有效
 		bool is_valid() const;
+
+		ULONG64 get_function_address() const noexcept;
 	private:
 		std::optional<ULONG64> m_record_number;
 		ULONG64 m_func_addr;
@@ -137,13 +140,13 @@ namespace smallzhong
 			return instance;
 		}
 
-		// 添加新的 hook，返回 hook 的索引（可用于手动移除）
-		size_t add_hook(ULONG64 funcAddr, ULONG64 callbackFunc);
+		// Return the installation status and optionally the index of the new hook.
+		NTSTATUS add_hook(ULONG64 funcAddr, ULONG64 callbackFunc, size_t* hook_index = nullptr);
 
 		// 使用模板添加 hook 的便捷方法
 		template<typename Func>
-		size_t add_hook(ULONG64 funcAddr, Func&& callback) {
-			return add_hook(funcAddr, reinterpret_cast<ULONG64>(+std::forward<Func>(callback)));
+		NTSTATUS add_hook(ULONG64 funcAddr, Func&& callback, size_t* hook_index = nullptr) {
+			return add_hook(funcAddr, reinterpret_cast<ULONG64>(+std::forward<Func>(callback)), hook_index);
 		}
 
 		// 移除特定的 hook (通过索引)
@@ -151,6 +154,9 @@ namespace smallzhong
 
 		// 移除所有 hooks
 		void remove_all_hooks();
+
+		// Stop hooks and wait for deferred cleanup before shutting down logging.
+		void shutdown();
 
 		// 获取当前 hook 数量
 		size_t hook_count() const;
@@ -170,19 +176,10 @@ namespace smallzhong
 
 		// 私有析构函数 (单例模式)
 		~HookManager() {
-			NTSTATUS status = STATUS_SUCCESS;
-			status = kernel_hook_unload();
-			if (!NT_SUCCESS(status))
-			{
-				LOG_ERROR("kernel hook unload failed!\r\n");
-			}
-			else
-			{
-				LOG_INFO("kernel_hook_unload success.\r\n");
-			}
-			LOG_WARN("HookManager is destructed(this is a singleton, if you see this message twice, there must be some error occured.)\r\n");
+			shutdown();
 		}
 
+		bool m_shutdown = false;
 		std::vector<Hook> m_hooks;
 		std::unordered_set<ULONG64> hooked_funcs;
 		mutable std::mutex m_mutex;  // 保护多线程访问

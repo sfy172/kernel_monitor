@@ -8,6 +8,9 @@
 #include "logging.h"
 
 
+static bool g_ImageCallbackRegistered = false;
+static bool g_KernelHooksInitialized = false;
+
 VOID ImageLoadCallback(
 	PUNICODE_STRING FullImageName,
 	HANDLE ProcessId,
@@ -40,30 +43,45 @@ VOID my_sleep(ULONG n)
 
 VOID DRIVERUNLOAD(_In_ struct _DRIVER_OBJECT* DriverObject)
 {
-	UNREFERENCED_PARAMETER(DriverObject);
-
-	// TODO£∫debug
-	//g_LogLevel = LOG_LEVEL_DEBUG;
-
-	NTSTATUS status = STATUS_SUCCESS;
-
-	status = PsRemoveLoadImageNotifyRoutine(ImageLoadCallback);
-	if (!NT_SUCCESS(status))
-	{
-		LOG_ERROR("PsRemoveLoadImageNotifyRoutine failed!\r\n");
-	}
+    UNREFERENCED_PARAMETER(DriverObject);
+    if (g_ImageCallbackRegistered) {
+        const NTSTATUS status = PsRemoveLoadImageNotifyRoutine(ImageLoadCallback);
+        if (!NT_SUCCESS(status)) {
+            LOG_ERROR("PsRemoveLoadImageNotifyRoutine failed, status 0x%08lX\r\n", static_cast<ULONG>(status));
+        }
+        g_ImageCallbackRegistered = false;
+    }
+    if (g_KernelHooksInitialized) {
+        GLOBAL_HOOK_MANAGER.shutdown();
+        g_KernelHooksInitialized = false;
+    }
+    LOG_INFO("Driver cleanup complete\r\n");
+    LogShutdown();
 }
 
+struct DriverInitializationGuard {
+    bool Complete = false;
+    ~DriverInitializationGuard() {
+        if (!Complete) {
+            DRIVERUNLOAD(nullptr);
+        }
+    }
+};
 
 EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_STRING Registry)
 {
 	UNREFERENCED_PARAMETER(Registry);
 
+	NTSTATUS status = LogInitialize();
+	if (!NT_SUCCESS(status)) {
+		LOG_ERROR("File logger initialization failed, status 0x%08lX\r\n", static_cast<ULONG>(status));
+	}
+	DriverInitializationGuard initialization;
+
 	LOG_WARN("driver loaded %p %llx\r\n", DriverObject->DriverStart, (ULONG64)DriverObject->DriverStart + DriverObject->DriverSize);
 
 	LOG_INFO("entry\r\n");
 
-	NTSTATUS status = STATUS_SUCCESS;
 
 	// ≥ı ºªØkernel_hook
 	status = kernel_hook_init(DriverObject);
@@ -73,12 +91,15 @@ EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_S
 		return status;
 	}
 
+	g_KernelHooksInitialized = true;
+
 	status = PsSetLoadImageNotifyRoutine(ImageLoadCallback);
 	if (!NT_SUCCESS(status))
 	{
 		LOG_ERROR("PsSetLoadImageNotifyRoutine failed\r\n");
 		return status;
 	}
+	g_ImageCallbackRegistered = true;
 
 	if (auto module_info = smallzhong::search::get_sys_module_info("ntoskrnl.exe"))
 	{
@@ -117,12 +138,13 @@ EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_S
 							return TRUE;
 							};
 
-						try {
-							GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(+lambda));
+						const NTSTATUS hook_status = GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(+lambda));
+						if (NT_SUCCESS(hook_status)) {
 							LOG_INFO("Successfully hooked %s at %llx\r\n", func.function_name.c_str(), func.address);
 						}
-						catch (const std::exception& e) {
-							LOG_INFO("Failed to hook %s: %s\r\n", func.function_name.c_str(), e.what());
+						else {
+							LOG_WARN("Failed to hook %s at %llx, status 0x%08lX\r\n",
+								func.function_name.c_str(), func.address, static_cast<ULONG>(hook_status));
 						}
 
 					}
@@ -140,12 +162,13 @@ EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_S
 							context->mRax = 1;
 							return TRUE;
 							};
-						try {
-							GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(+lambda));
+						const NTSTATUS hook_status = GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(+lambda));
+						if (NT_SUCCESS(hook_status)) {
 							LOG_INFO("Successfully hooked %s at %llx\r\n", func.function_name.c_str(), func.address);
 						}
-						catch (const std::exception& e) {
-							LOG_INFO("Failed to hook %s: %s\r\n", func.function_name.c_str(), e.what());
+						else {
+							LOG_WARN("Failed to hook %s at %llx, status 0x%08lX\r\n",
+								func.function_name.c_str(), func.address, static_cast<ULONG>(hook_status));
 						}
 
 					}
@@ -156,12 +179,13 @@ EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_S
 						PFN_GUEST_CALLBACK handler = find_handler_by_name(func.function_name.c_str());
 						if (handler)
 						{
-							try {
-								GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(handler));
+							const NTSTATUS hook_status = GLOBAL_HOOK_MANAGER.add_hook(func.address, reinterpret_cast<ULONG64>(handler));
+							if (NT_SUCCESS(hook_status)) {
 								LOG_INFO("Successfully hooked %s at %llx\r\n", func.function_name.c_str(), func.address);
 							}
-							catch (const std::exception& e) {
-								LOG_INFO("Failed to hook %s: %s\r\n", func.function_name.c_str(), e.what());
+							else {
+								LOG_WARN("Failed to hook %s at %llx, status 0x%08lX\r\n",
+									func.function_name.c_str(), func.address, static_cast<ULONG>(hook_status));
 							}
 						}
 					}
@@ -180,5 +204,6 @@ EXTERN_C NTSTATUS DriverMain(const PDRIVER_OBJECT DriverObject, const PUNICODE_S
 	}
 
 	DriverObject->DriverUnload = DRIVERUNLOAD;
+	initialization.Complete = true;
 	return STATUS_SUCCESS;
 }

@@ -117,8 +117,7 @@ namespace smallzhong
 
 			if (index == 0) {
 				// 不在监控范围内，没法删除
-				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
-					"不在监控范围内，没法del。函数调用addr = %llx\r\n", addr));
+				LOG_INFO("不在监控范围内，没法del。函数调用addr = %llx\r\n", addr);
 			}
 			else {
 				// FilterRetAddr 返回的索引从 1 开始，需要减 1
@@ -127,9 +126,8 @@ namespace smallzhong
 				// 标记为已删除
 				m_ranges[index].is_deleted = TRUE;
 
-				KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
-					"删除index = %llx start_addr = %llx end_addr = %llx的监控区域。函数调用addr = %llx\r\n",
-					index, m_ranges[index].start_addr, m_ranges[index].end_addr, addr));
+				LOG_INFO("删除index = %llx start_addr = %llx end_addr = %llx的监控区域。函数调用addr = %llx\r\n",
+					index, m_ranges[index].start_addr, m_ranges[index].end_addr, addr);
 			}
 
 			// 释放自旋锁，降低 IRQL
