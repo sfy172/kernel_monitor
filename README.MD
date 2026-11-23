@@ -53,12 +53,6 @@
 
 日志文件为运行监控驱动的系统中的 `C:\kernel_monitor.log`。每次加载会在文件末尾继续追加。需要调整路径时，修改 `logging.c` 中 `LogInitialize` 的 `fileName`。
 
-可在 PowerShell 中持续查看文件末尾。
-
-```powershell
-Get-Content -LiteralPath 'C:\kernel_monitor.log' -Tail 50 -Wait
-```
-
 - `g_LogLevel` 默认值为 `LOG_LEVEL_INFO`，调试输出和文件日志都受该级别控制。
 - 队列最多容纳 2048 条待处理记录，每条最多 1023 字节。超长记录会标记 `...[truncated]`。
 - 队列满或调用发生在高于 `DISPATCH_LEVEL` 的 IRQL 时，文件日志会丢弃该条记录，并在后续输出中报告丢弃数量。
